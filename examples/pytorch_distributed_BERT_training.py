@@ -15,6 +15,7 @@
 #    python3 pytorch_distributed_BERT_training.py --total-epochs <epoch_number> --batch-size <batch_size> --directory-path <'your_s3_directory_path'>
 #
 # Dependencies: fsspec, alluxiofs, s3fs, torch, transformers, numpy, pandas, tqdm, bisect, os, time
+from alluxiofs import alluxioio
 import bisect
 import os
 import time
@@ -41,7 +42,6 @@ from alluxiofs import AlluxioFileSystem
 class BertDataset(Dataset):
     def __init__(
         self,
-        alluxio_fs,
         tokenizer,
         max_length,
         directory_path,
@@ -51,7 +51,6 @@ class BertDataset(Dataset):
         output_filename,
     ):
         super(BertDataset, self).__init__()
-        self.alluxio_fs = alluxio_fs
         self.directory_path = directory_path
 
         self.tokenizer = tokenizer
@@ -94,7 +93,7 @@ class BertDataset(Dataset):
         chunk_number = target_line_index // self.read_chunk_size
         line_within_chunk = target_line_index % self.read_chunk_size
         chunk_iterator = pd.read_csv(
-            self.alluxio_fs.open(target_file_name, mode="r"),
+            open(target_file_name, mode="r"),
             chunksize=self.read_chunk_size,
         )
 
@@ -195,7 +194,7 @@ def finetune(epochs, dataloader, model, loss_fn, optimizer, rank, cpu_id):
     return model
 
 
-def preprocess(directory_path, chunk_size, alluxio_fs):
+def preprocess(directory_path, chunk_size):
     """
     Preprocess each file in the directory for Dataset class.
     :param directory_path: directory path contain the files to be processed
@@ -208,7 +207,7 @@ def preprocess(directory_path, chunk_size, alluxio_fs):
     next_start_line_num = 0
     total_length = 0
 
-    all_files_info = alluxio_fs.ls(directory_path)
+    all_files_info = os.listdir(directory_path)
 
     # iterate each file in alluxio cache to get start line number for each file
     for file_info in all_files_info:
@@ -218,7 +217,7 @@ def preprocess(directory_path, chunk_size, alluxio_fs):
         # calculate length of each file, read the csv by chunk in case the file is too big to fit into the memory
         file_length = 0
         chunk_iterator = pd.read_csv(
-            alluxio_fs.open(file_name, mode="r"), chunksize=chunk_size
+            open(file_name, mode="r"), chunksize=chunk_size
         )
         for chunk in chunk_iterator:
             file_length += len(chunk)
@@ -242,7 +241,6 @@ def main(
     directory_path,
     preprocessed_file_info,
     total_length,
-    alluxio_fs,
 ):
 
     # distributed training settings
@@ -263,7 +261,6 @@ def main(
     print(f"Loading dataset on rank {rank}")
 
     dataset = BertDataset(
-        alluxio_fs,
         tokenizer,
         max_length=100,
         directory_path=directory_path,
@@ -331,21 +328,9 @@ if __name__ == "__main__":
         load_progress = progress[1]["jobState"]
         print("Load progress:", load_progress)
 
-    # set up alluxio filesystem
-    # it will be used in preprocess() function and BertDataset class to access files in alluxio
-    fsspec.register_implementation(
-        "alluxiofs", AlluxioFileSystem, clobber=True
-    )
-    alluxio_fs = fsspec.filesystem(
-        "alluxiofs",
-        etcd_hosts="localhost",
-        etcd_port=2379,
-        target_protocol="s3",
-    )
-
     # preprocess files in the directory
     preprocessed_file_info, total_length = preprocess(
-        args.directory_path, 5000, alluxio_fs
+        args.directory_path, 5000
     )
 
     world_size = (
@@ -362,7 +347,6 @@ if __name__ == "__main__":
             args.directory_path,
             preprocessed_file_info,
             total_length,
-            alluxio_fs,
         ),
         nprocs=world_size,
         join=True,
